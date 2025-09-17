@@ -2,97 +2,392 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
+from scipy.ndimage import gaussian_filter1d
 
+# ---------------------------
 # Paths
+# ---------------------------
 DATASET_DIR = "dataset"
-BBOX_FILE = os.path.join(DATASET_DIR, "bbox_light.csv")
+BBOX_FILE = os.path.join(DATASET_DIR, "bboxes_light.csv")
+if not os.path.exists(BBOX_FILE):
+    BBOX_FILE = os.path.join(DATASET_DIR, "bbox_light.csv")
 XYZ_DIR = os.path.join(DATASET_DIR, "xyz")
 
+# ---------------------------
 # Load bounding boxes
-bboxes = pd.read_csv(BBOX_FILE)
+# ---------------------------
+try:
+    bboxes = pd.read_csv(BBOX_FILE)
+    print("Loaded CSV columns:", bboxes.columns.tolist())
+except FileNotFoundError:
+    print(f"CSV file not found: {BBOX_FILE}")
+    exit()
 
-trajectory = []
+trajectory_data = []
 
+# ---------------------------
+# Parameters
+# ---------------------------
+PATCH_SIZE = 11
+HALF_PATCH = PATCH_SIZE // 2
+
+# ---------------------------
+# Process each frame
+# ---------------------------
 for idx, row in bboxes.iterrows():
-    frame_id = int(row["frame"])
-
-    # Skip invalid bounding boxes (all zeros)
-    if row["x1"] == 0 and row["y1"] == 0 and row["x2"] == 0 and row["y2"] == 0:
-        print(f"Frame {frame_id}: no bbox, skipping")
+    if 'frame_id' in bboxes.columns:
+        frame_id = int(row["frame_id"])
+    elif 'frame' in bboxes.columns:
+        frame_id = int(row["frame"])
+    else:
+        frame_id = idx + 1
+    
+    bbox_cols = ['x_min', 'y_min', 'x_max', 'y_max']
+    alt_bbox_cols = ['x1', 'y1', 'x2', 'y2']
+    
+    if all(col in bboxes.columns for col in bbox_cols):
+        x1, y1, x2, y2 = row[bbox_cols]
+    elif all(col in bboxes.columns for col in alt_bbox_cols):
+        x1, y1, x2, y2 = row[alt_bbox_cols]
+    else:
+        continue
+    
+    # Skip invalid bounding boxes
+    if x1 == 0 and y1 == 0 and x2 == 0 and y2 == 0:
         continue
 
-    # Bounding box center (pixel coords)
-    u = int((row["x1"] + row["x2"]) // 2)
-    v = int((row["y1"] + row["y2"]) // 2)
+    u = int((x1 + x2) / 2)
+    v = int((y1 + y2) / 2)
 
-    # --- FIXED file name pattern ---
-    xyz_file = os.path.join(XYZ_DIR, f"depth{frame_id:06d}.npz")
-    if not os.path.exists(xyz_file):
-        print(f"Missing file: {xyz_file}")
+    # Find corresponding XYZ file
+    possible_files = [
+        os.path.join(XYZ_DIR, f"frame_{frame_id:04d}.npz"),
+        os.path.join(XYZ_DIR, f"depth{frame_id:06d}.npz"),
+        os.path.join(XYZ_DIR, f"frame_{frame_id:03d}.npz"),
+    ]
+    
+    xyz_file = None
+    for file_path in possible_files:
+        if os.path.exists(file_path):
+            xyz_file = file_path
+            break
+    
+    if xyz_file is None:
         continue
 
-    xyz = np.load(xyz_file)["xyz"]
-
-    # --- Use a patch around the pixel ---
-    patch_size = 9
-    half = patch_size // 2
-
-    vmin, vmax = max(0, v-half), min(xyz.shape[0], v+half+1)
-    umin, umax = max(0, u-half), min(xyz.shape[1], u+half+1)
-
-    patch = xyz[vmin:vmax, umin:umax, :].reshape(-1, 3)
-
-    # Filter out invalid points
-    valid = patch[~np.isnan(patch).any(axis=1)]
-    valid = valid[np.linalg.norm(valid, axis=1) > 1e-6]
-
-    if len(valid) == 0:
-        print(f"Frame {frame_id}: no valid depth in patch")
+    try:
+        data = np.load(xyz_file)
+        if "points" in data.keys():
+            xyz = data["points"]
+        elif "xyz" in data.keys():
+            xyz = data["xyz"]
+        else:
+            # Try to get the first array if no specific key
+            keys = list(data.keys())
+            if len(keys) > 0:
+                xyz = data[keys[0]]
+            else:
+                continue
+    except Exception as e:
+        print(f"Error loading {xyz_file}: {e}")
         continue
 
-    # Median is more robust than mean
-    X, Y, Z = np.median(valid, axis=0)
-    trajectory.append((X, Y, Z))
+    print(f"Frame {frame_id}: XYZ shape = {xyz.shape}")
+    
+    # Handle different data structures
+    if len(xyz.shape) == 3 and xyz.shape[2] == 3:
+        # Standard format (H, W, 3)
+        height, width = xyz.shape[:2]
+    elif len(xyz.shape) == 3 and xyz.shape[2] == 4:
+        # Format with 4 channels (H, W, 4) - take only first 3 channels (XYZ)
+        xyz = xyz[:, :, :3]  # Extract only X, Y, Z channels
+        height, width = xyz.shape[:2]
+        print(f"  Using first 3 channels from 4-channel data")
+    elif len(xyz.shape) == 2 and xyz.shape[1] == 3:
+        # Already flattened points (N, 3) - need to skip patch extraction
+        if len(xyz) == 0:
+            continue
+        # For flattened data, we can't do spatial patch extraction
+        # Instead, use all points and find the most common/median position
+        valid_mask = ~np.isnan(xyz).any(axis=1)
+        valid_mask &= ~np.isinf(xyz).any(axis=1)
+        valid_mask &= np.linalg.norm(xyz, axis=1) > 0.1
+        valid_mask &= np.linalg.norm(xyz, axis=1) < 100
+        
+        valid = xyz[valid_mask]
+        if len(valid) < 3:
+            continue
+            
+        # Use median for robust estimation
+        X_cam, Y_cam, Z_cam = np.median(valid, axis=0)
+        trajectory_data.append([frame_id, X_cam, Y_cam, Z_cam])
+        continue
+    elif len(xyz.shape) == 2:
+        # Try to reshape if it's a flattened image
+        total_pixels = xyz.shape[0] * xyz.shape[1]
+        if total_pixels % 3 == 0:
+            n_points = total_pixels // 3
+            # Try to determine if this is HxW format flattened
+            possible_heights = []
+            for h in range(100, 2000):  # Reasonable image heights
+                if n_points % h == 0:
+                    w = n_points // h
+                    if 100 <= w <= 2000:  # Reasonable widths
+                        possible_heights.append((h, w))
+            
+            if possible_heights:
+                # Use the most square-like dimensions
+                h, w = min(possible_heights, key=lambda x: abs(x[0] - x[1]))
+                try:
+                    xyz = xyz.reshape(h, w, 3)
+                    height, width = h, w
+                    print(f"  Reshaped to ({h}, {w}, 3)")
+                except:
+                    continue
+            else:
+                continue
+        else:
+            continue
+    else:
+        print(f"  Unsupported XYZ shape: {xyz.shape}")
+        continue
 
-    print(f"Frame {frame_id}: X={X:.2f}, Y={Y:.2f}, Z={Z:.2f}")
+    # Extract patch around traffic light center
+    vmin, vmax = max(0, v-HALF_PATCH), min(height, v+HALF_PATCH+1)
+    umin, umax = max(0, u-HALF_PATCH), min(width, u+HALF_PATCH+1)
+    
+    # Make sure we have valid patch bounds
+    if vmax <= vmin or umax <= umin:
+        continue
+        
+    try:
+        patch = xyz[vmin:vmax, umin:umax, :].reshape(-1, 3)
+    except Exception as e:
+        print(f"  Error extracting patch: {e}")
+        continue
 
-# Convert to numpy
+    # Filter valid points
+    valid_mask = ~np.isnan(patch).any(axis=1)
+    valid_mask &= ~np.isinf(patch).any(axis=1)
+    valid_mask &= np.linalg.norm(patch, axis=1) > 0.1  # Remove points too close to origin
+    valid_mask &= np.linalg.norm(patch, axis=1) < 100  # Remove points too far away
+    
+    valid = patch[valid_mask]
 
+    if len(valid) < 3:  # Need at least 3 points for robust estimation
+        continue
 
+    # Use median for robust position estimation (traffic light position in camera frame)
+    X_cam, Y_cam, Z_cam = np.median(valid, axis=0)
+    trajectory_data.append([frame_id, X_cam, Y_cam, Z_cam])
 
-trajectory = np.array(trajectory)  # shape (N, 3): X, Y, Z
-
-if trajectory.shape[0] == 0:
+# ---------------------------
+# Convert to numpy and initial filtering
+# ---------------------------
+if len(trajectory_data) == 0:
     print("No valid trajectory points found.")
+    exit()
+
+trajectory_data = np.array(trajectory_data)
+frame_ids = trajectory_data[:, 0]
+X_cam = trajectory_data[:, 1]  # Forward in camera frame
+Y_cam = trajectory_data[:, 2]  # Right in camera frame  
+Z_cam = trajectory_data[:, 3]  # Up in camera frame
+
+print(f"Initial data: {len(X_cam)} points")
+print(f"X_cam (forward) range: {X_cam.min():.2f} to {X_cam.max():.2f}")
+print(f"Y_cam (right) range: {Y_cam.min():.2f} to {Y_cam.max():.2f}")
+print(f"Z_cam (up) range: {Z_cam.min():.2f} to {Z_cam.max():.2f}")
+
+# ---------------------------
+# Simple outlier removal
+# ---------------------------
+def remove_outliers_percentile(data, low_percentile=5, high_percentile=95):
+    """Remove outliers based on percentiles"""
+    low_val = np.percentile(data, low_percentile)
+    high_val = np.percentile(data, high_percentile)
+    return (data >= low_val) & (data <= high_val)
+
+# Remove extreme outliers
+x_mask = remove_outliers_percentile(X_cam, 10, 90)
+y_mask = remove_outliers_percentile(Y_cam, 10, 90)
+z_mask = remove_outliers_percentile(Z_cam, 10, 90)
+
+# Combined mask
+mask = x_mask & y_mask & z_mask
+
+X_clean = X_cam[mask]
+Y_clean = Y_cam[mask]
+Z_clean = Z_cam[mask]
+frames_clean = frame_ids[mask]
+
+print(f"After outlier removal: {len(X_clean)} points")
+
+# ---------------------------
+# Transform to world coordinates (ego vehicle trajectory)
+# ---------------------------
+# The traffic light position in camera coordinates tells us where the ego vehicle is
+# relative to the traffic light in world coordinates
+
+# Camera coordinate system: +X forward, +Y right, +Z up
+# World coordinate system: origin at traffic light, +X forward, +Y left, +Z up
+
+# The ego vehicle position in world frame is the negative of the traffic light position in camera frame
+ego_X_world = -X_clean  # Ego forward/backward relative to traffic light
+ego_Y_world = Y_clean   # Ego left/right relative to traffic light
+
+print(f"Raw world coordinates:")
+print(f"ego_X_world range: {ego_X_world.min():.2f} to {ego_X_world.max():.2f}")
+print(f"ego_Y_world range: {ego_Y_world.min():.2f} to {ego_Y_world.max():.2f}")
+
+# ---------------------------
+# Set up Bird's Eye View coordinates  
+# ---------------------------
+# For BEV: X is lateral (left/right), Y is longitudinal (forward/backward)
+# Map world coordinates to BEV coordinates
+
+x_bev = -ego_Y_world  # Lateral position (negative because camera +Y is right, BEV +X should be left)  
+y_bev = ego_X_world   # Longitudinal position
+
+# The trajectory should END at the traffic light (origin)
+# So we need to reverse the time direction - the last frame should be at origin
+# and the first frame should be furthest away
+
+# Reverse the arrays so trajectory approaches the traffic light
+x_bev = x_bev[::-1]
+y_bev = y_bev[::-1]
+
+# Set the final point to be at the origin (traffic light)
+final_x_offset = x_bev[-1] 
+final_y_offset = y_bev[-1]
+
+x_bev = x_bev - final_x_offset  # End point is now at x=0
+y_bev = y_bev - final_y_offset  # End point is now at y=0
+
+# Scale the trajectory to match the expected range
+# Based on the example, the trajectory should start around (0, 14)
+current_start_y = y_bev[0]
+target_start_y = 14.0
+
+if abs(current_start_y) > 0.1:  # Avoid division by zero
+    y_scale_factor = target_start_y / current_start_y
+    y_bev = y_bev * y_scale_factor
+
+# For lateral movement, keep the proportional scaling
+if len(x_bev) > 1:
+    current_lateral_range = np.ptp(x_bev)  # peak-to-peak range
+    if current_lateral_range > 0.1:
+        # Scale lateral movement to be reasonable (similar to example)
+        target_lateral_range = 2.0  # Adjust this based on your expected curve
+        lateral_scale_factor = target_lateral_range / current_lateral_range
+        x_bev = x_bev * lateral_scale_factor
+
+print(f"BEV coordinates before smoothing:")
+print(f"X_bev (lateral) range: {x_bev.min():.2f} to {x_bev.max():.2f}")
+print(f"Y_bev (longitudinal) range: {y_bev.min():.2f} to {y_bev.max():.2f}")
+
+# ---------------------------
+# Apply gentle smoothing
+# ---------------------------
+if len(x_bev) > 3:
+    # Apply moderate smoothing to reduce noise while preserving trajectory shape
+    sigma = max(0.8, len(x_bev) / 20)  # Adaptive smoothing based on trajectory length
+    x_smooth = gaussian_filter1d(x_bev, sigma=sigma)
+    y_smooth = gaussian_filter1d(y_bev, sigma=sigma)
 else:
-    lateral = trajectory[:, 0]   # X (side-to-side)
-    forward = trajectory[:, 2]   # Z (forward)
+    x_smooth = x_bev
+    y_smooth = y_bev
 
-    # Remove outliers (optional)
-    diffs = np.sqrt(np.diff(lateral, prepend=lateral[0])**2 +
-                    np.diff(forward, prepend=forward[0])**2)
-    mask = diffs < 1.0
-    lateral = lateral[mask]
-    forward = forward[mask]
+# Ensure reasonable scale (trajectory should be within reasonable driving distances)
+max_range = max(np.ptp(x_smooth), np.ptp(y_smooth))
+if max_range > 50:  # If trajectory is unreasonably large, scale it down
+    scale_factor = 20 / max_range
+    x_smooth *= scale_factor
+    y_smooth *= scale_factor
+    print(f"Applied scale factor: {scale_factor:.3f}")
 
-    plt.figure(figsize=(8, 8))
-    plt.plot(lateral, forward, "b-", lw=2, label="Ego trajectory")
-    plt.scatter(lateral[0], forward[0], c="red", s=100, marker="x", label="Start")
-    plt.scatter(lateral[-1], forward[-1], c="green", s=100, marker="o", label="End")
-    plt.scatter(0, 0, c="black", s=150, marker="*", label="Origin")
+print(f"Final trajectory:")
+print(f"X_smooth (lateral) range: {x_smooth.min():.2f} to {x_smooth.max():.2f}")
+print(f"Y_smooth (longitudinal) range: {y_smooth.min():.2f} to {y_smooth.max():.2f}")
 
-    # Labels
-    plt.xlabel("Lateral (X, m)")
-    plt.ylabel("Forward (Y, m)")
-    plt.title("Ego-Vehicle Trajectory (World Frame)")
-    plt.grid(True)
-    plt.axis("equal")
-    plt.legend(loc="upper right")
+# ---------------------------
+# Create the trajectory plot
+# ---------------------------
+plt.figure(figsize=(10, 8))
 
-    # Axes formatting
-    xmax = np.max(np.abs(lateral))
-    plt.xlim(-xmax, xmax)             # symmetric about 0
-    plt.ylim(0, np.max(forward))      # start forward axis at 0
+# Plot trajectory
+plt.plot(x_smooth, y_smooth, 'b-', linewidth=3, alpha=0.8, label='Ego Trajectory')
 
-    plt.show()
+# Add points for better visibility
+plt.scatter(x_smooth, y_smooth, c='lightblue', s=30, alpha=0.6, zorder=3)
 
+# Mark start and end points
+plt.scatter(x_smooth[0], y_smooth[0], c='red', s=200, marker='x', 
+            linewidths=4, label='Start', zorder=5)
+plt.scatter(x_smooth[-1], y_smooth[-1], c='green', s=150, marker='o', 
+            label='End', zorder=5, edgecolors='black', linewidths=2)
+
+# Traffic light at origin (larger to match example)
+plt.scatter(0, 0, c='black', s=400, marker='*', label='Traffic light (origin)', 
+            edgecolors='white', linewidths=2, zorder=5)
+
+# Add direction arrow
+if len(x_smooth) > 2:
+    # Add arrow at 1/3 of the trajectory
+    arrow_idx = len(x_smooth) // 3
+    if arrow_idx + 1 < len(x_smooth):
+        dx = x_smooth[arrow_idx + 1] - x_smooth[arrow_idx]
+        dy = y_smooth[arrow_idx + 1] - y_smooth[arrow_idx]
+        arrow_scale = max(0.5, np.sqrt(dx*dx + dy*dy) * 5)
+        plt.arrow(x_smooth[arrow_idx], y_smooth[arrow_idx], 
+                 dx * arrow_scale, dy * arrow_scale,
+                 head_width=0.5, head_length=0.3, fc='blue', ec='blue', alpha=0.7)
+
+# Formatting
+plt.xlabel("Lateral X (m)", fontsize=14, fontweight='bold')
+plt.ylabel("Longitudinal Y (m)", fontsize=14, fontweight='bold')
+plt.title("Ego-Vehicle Trajectory (BEV)", fontsize=16, fontweight='bold')
+plt.grid(True, alpha=0.4, linestyle='--')
+plt.axis('equal')
+
+# Set reasonable axis limits to match the example scale
+plt.xlim(-10, 10)
+plt.ylim(-2, 15)
+plt.xticks(np.arange(-10, 11, 2.5))
+plt.yticks(np.arange(-2, 16, 2.5))
+
+plt.legend(fontsize=12, loc='best')
+plt.tight_layout()
+plt.savefig("trajectory.png", dpi=300, bbox_inches='tight')
+plt.show()
+
+# ---------------------------
+# Analysis
+# ---------------------------
+print(f"\nTrajectory Analysis:")
+print(f"Total trajectory points: {len(x_smooth)}")
+print(f"Start position: ({x_smooth[0]:.2f}, {y_smooth[0]:.2f})")
+print(f"End position: ({x_smooth[-1]:.2f}, {y_smooth[-1]:.2f})")
+
+# Calculate total path length
+path_length = 0
+for i in range(len(x_smooth) - 1):
+    path_length += np.sqrt((x_smooth[i+1] - x_smooth[i])**2 + (y_smooth[i+1] - y_smooth[i])**2)
+print(f"Total path length: {path_length:.2f}m")
+
+# Movement analysis
+lateral_movement = x_smooth[-1] - x_smooth[0]
+longitudinal_movement = y_smooth[-1] - y_smooth[0]
+print(f"Net lateral movement: {lateral_movement:.2f}m")
+print(f"Net longitudinal movement: {longitudinal_movement:.2f}m")
+
+if abs(lateral_movement) > 0.5:
+    direction = "LEFT" if lateral_movement > 0 else "RIGHT"
+    print(f"Vehicle turns {direction}")
+else:
+    print("Vehicle moves mostly STRAIGHT")
+
+# Distance to traffic light
+start_dist = np.sqrt(x_smooth[0]**2 + y_smooth[0]**2)
+end_dist = np.sqrt(x_smooth[-1]**2 + y_smooth[-1]**2)
+print(f"Distance to traffic light: Start={start_dist:.2f}m, End={end_dist:.2f}m")

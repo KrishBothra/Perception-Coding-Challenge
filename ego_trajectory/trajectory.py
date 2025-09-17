@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 import os
 from scipy.ndimage import gaussian_filter1d
 
@@ -311,24 +312,96 @@ print(f"X_smooth (lateral) range: {x_smooth.min():.2f} to {x_smooth.max():.2f}")
 print(f"Y_smooth (longitudinal) range: {y_smooth.min():.2f} to {y_smooth.max():.2f}")
 
 # ---------------------------
-# Create the trajectory plot
+# Create animated trajectory plot
 # ---------------------------
-plt.figure(figsize=(10, 8))
+fig, ax = plt.subplots(figsize=(10, 8))
+
+# Set up the plot
+ax.set_xlabel("Lateral X (m)", fontsize=14, fontweight='bold')
+ax.set_ylabel("Longitudinal Y (m)", fontsize=14, fontweight='bold')
+ax.set_title("Ego-Vehicle Trajectory (BEV) - Animated", fontsize=16, fontweight='bold')
+ax.grid(True, alpha=0.4, linestyle='--')
+ax.set_xlim(-10, 10)
+ax.set_ylim(-2, 15)
+ax.set_xticks(np.arange(-10, 11, 2.5))
+ax.set_yticks(np.arange(-2, 16, 2.5))
+ax.axis('equal')
+
+# Plot static elements
+traffic_light = ax.scatter(0, 0, c='black', s=400, marker='*', 
+                          label='Traffic light (origin)', 
+                          edgecolors='white', linewidths=2, zorder=5)
+
+# Initialize trajectory line
+line, = ax.plot([], [], 'b-', linewidth=3, alpha=0.8, label='Ego Trajectory')
+trail_points = ax.scatter([], [], c='lightblue', s=30, alpha=0.6, zorder=3)
+
+# Mark start point (static)
+start_point = ax.scatter(x_smooth[0], y_smooth[0], c='red', s=200, marker='x', 
+                        linewidths=4, label='Start', zorder=5)
+
+# End point will appear at the end
+end_point = ax.scatter([], [], c='green', s=150, marker='o', 
+                      label='End', zorder=5, edgecolors='black', linewidths=2)
+
+ax.legend(fontsize=12, loc='best')
+
+# Animation function
+def animate(frame):
+    # Calculate how many points to show based on frame number
+    if frame == 0:
+        return line, trail_points, end_point
+    
+    # Show progression of trajectory
+    num_points = min(frame + 1, len(x_smooth))
+    
+    # Update trajectory line
+    line.set_data(x_smooth[:num_points], y_smooth[:num_points])
+    
+    # Update trail points
+    if num_points > 1:
+        trail_points.set_offsets(np.column_stack((x_smooth[:num_points], y_smooth[:num_points])))
+    else:
+        trail_points.set_offsets(np.empty((0, 2)))  # Empty array for no points
+    
+    # Show end point when trajectory is complete
+    if num_points == len(x_smooth):
+        end_point.set_offsets([[x_smooth[-1], y_smooth[-1]]])
+    else:
+        end_point.set_offsets(np.empty((0, 2)))  # Properly hide end point
+    
+    return line, trail_points, end_point
+
+# Create animation
+anim = animation.FuncAnimation(fig, animate, frames=len(x_smooth)+10, 
+                              interval=100, blit=False, repeat=True)
+
+# Save as MP4
+print("Saving animated trajectory...")
+anim.save("trajectory.mp4", writer='ffmpeg', fps=10, bitrate=1800)
+print("Animation saved as trajectory.mp4")
+
+# Show the animation
+plt.tight_layout()
+plt.show()
+
+# Also create the static plot
+fig2, ax2 = plt.subplots(figsize=(10, 8))
 
 # Plot trajectory
-plt.plot(x_smooth, y_smooth, 'b-', linewidth=3, alpha=0.8, label='Ego Trajectory')
+ax2.plot(x_smooth, y_smooth, 'b-', linewidth=3, alpha=0.8, label='Ego Trajectory')
 
 # Add points for better visibility
-plt.scatter(x_smooth, y_smooth, c='lightblue', s=30, alpha=0.6, zorder=3)
+ax2.scatter(x_smooth, y_smooth, c='lightblue', s=30, alpha=0.6, zorder=3)
 
 # Mark start and end points
-plt.scatter(x_smooth[0], y_smooth[0], c='red', s=200, marker='x', 
+ax2.scatter(x_smooth[0], y_smooth[0], c='red', s=200, marker='x', 
             linewidths=4, label='Start', zorder=5)
-plt.scatter(x_smooth[-1], y_smooth[-1], c='green', s=150, marker='o', 
+ax2.scatter(x_smooth[-1], y_smooth[-1], c='green', s=150, marker='o', 
             label='End', zorder=5, edgecolors='black', linewidths=2)
 
 # Traffic light at origin (larger to match example)
-plt.scatter(0, 0, c='black', s=400, marker='*', label='Traffic light (origin)', 
+ax2.scatter(0, 0, c='black', s=400, marker='*', label='Traffic light (origin)', 
             edgecolors='white', linewidths=2, zorder=5)
 
 # Add direction arrow
@@ -339,24 +412,24 @@ if len(x_smooth) > 2:
         dx = x_smooth[arrow_idx + 1] - x_smooth[arrow_idx]
         dy = y_smooth[arrow_idx + 1] - y_smooth[arrow_idx]
         arrow_scale = max(0.5, np.sqrt(dx*dx + dy*dy) * 5)
-        plt.arrow(x_smooth[arrow_idx], y_smooth[arrow_idx], 
+        ax2.arrow(x_smooth[arrow_idx], y_smooth[arrow_idx], 
                  dx * arrow_scale, dy * arrow_scale,
                  head_width=0.5, head_length=0.3, fc='blue', ec='blue', alpha=0.7)
 
 # Formatting
-plt.xlabel("Lateral X (m)", fontsize=14, fontweight='bold')
-plt.ylabel("Longitudinal Y (m)", fontsize=14, fontweight='bold')
-plt.title("Ego-Vehicle Trajectory (BEV)", fontsize=16, fontweight='bold')
-plt.grid(True, alpha=0.4, linestyle='--')
-plt.axis('equal')
+ax2.set_xlabel("Lateral X (m)", fontsize=14, fontweight='bold')
+ax2.set_ylabel("Longitudinal Y (m)", fontsize=14, fontweight='bold')
+ax2.set_title("Ego-Vehicle Trajectory (BEV)", fontsize=16, fontweight='bold')
+ax2.grid(True, alpha=0.4, linestyle='--')
+ax2.axis('equal')
 
 # Set reasonable axis limits to match the example scale
-plt.xlim(-10, 10)
-plt.ylim(-2, 15)
-plt.xticks(np.arange(-10, 11, 2.5))
-plt.yticks(np.arange(-2, 16, 2.5))
+ax2.set_xlim(-10, 10)
+ax2.set_ylim(-2, 15)
+ax2.set_xticks(np.arange(-10, 11, 2.5))
+ax2.set_yticks(np.arange(-2, 16, 2.5))
 
-plt.legend(fontsize=12, loc='best')
+ax2.legend(fontsize=12, loc='best')
 plt.tight_layout()
 plt.savefig("trajectory.png", dpi=300, bbox_inches='tight')
 plt.show()

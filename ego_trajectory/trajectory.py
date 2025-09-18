@@ -9,9 +9,7 @@ from scipy.ndimage import gaussian_filter1d
 # Paths
 # ---------------------------
 DATASET_DIR = "dataset"
-BBOX_FILE = os.path.join(DATASET_DIR, "bboxes_light.csv")
-if not os.path.exists(BBOX_FILE):
-    BBOX_FILE = os.path.join(DATASET_DIR, "bbox_light.csv")
+BBOX_FILE = os.path.join(DATASET_DIR, "bbox_light.csv")
 XYZ_DIR = os.path.join(DATASET_DIR, "xyz")
 
 # ---------------------------
@@ -34,25 +32,16 @@ HALF_PATCH = PATCH_SIZE // 2
 
 # ---------------------------
 # Process each frame
-# ---------------------------
+# ---------------------------   
 for idx, row in bboxes.iterrows():
-    if 'frame_id' in bboxes.columns:
-        frame_id = int(row["frame_id"])
-    elif 'frame' in bboxes.columns:
-        frame_id = int(row["frame"])
-    else:
-        frame_id = idx + 1
     
-    bbox_cols = ['x_min', 'y_min', 'x_max', 'y_max']
-    alt_bbox_cols = ['x1', 'y1', 'x2', 'y2']
     
-    if all(col in bboxes.columns for col in bbox_cols):
-        x1, y1, x2, y2 = row[bbox_cols]
-    elif all(col in bboxes.columns for col in alt_bbox_cols):
-        x1, y1, x2, y2 = row[alt_bbox_cols]
-    else:
-        continue
+    bbox_cols = ['x1', 'y1', 'x2', 'y2']
     
+    x1, y1, x2, y2 = row[bbox_cols]
+
+    frame_id = int(row["frame"])
+ 
     # Skip invalid bounding boxes
     if x1 == 0 and y1 == 0 and x2 == 0 and y2 == 0:
         continue
@@ -61,37 +50,19 @@ for idx, row in bboxes.iterrows():
     v = int((y1 + y2) / 2)
 
     # Find corresponding XYZ file
-    possible_files = [
-        os.path.join(XYZ_DIR, f"frame_{frame_id:04d}.npz"),
-        os.path.join(XYZ_DIR, f"depth{frame_id:06d}.npz"),
-        os.path.join(XYZ_DIR, f"frame_{frame_id:03d}.npz"),
-    ]
-    
-    xyz_file = None
-    for file_path in possible_files:
-        if os.path.exists(file_path):
-            xyz_file = file_path
-            break
-    
-    if xyz_file is None:
+    xyz_file = os.path.join(XYZ_DIR, f"depth{frame_id:06d}.npz")
+
+    # Skip if file doesn't exist
+    if not os.path.exists(xyz_file):
         continue
 
     try:
         data = np.load(xyz_file)
-        if "points" in data.keys():
-            xyz = data["points"]
-        elif "xyz" in data.keys():
-            xyz = data["xyz"]
-        else:
-            # Try to get the first array if no specific key
-            keys = list(data.keys())
-            if len(keys) > 0:
-                xyz = data[keys[0]]
-            else:
-                continue
+        xyz = data["xyz"]  # Always use the 'xyz' key
     except Exception as e:
         print(f"Error loading {xyz_file}: {e}")
         continue
+
 
     print(f"Frame {frame_id}: XYZ shape = {xyz.shape}")
     
